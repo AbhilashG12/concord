@@ -1,3 +1,4 @@
+pub mod storage;
 pub mod state_machine;
 pub mod command;
 pub mod raft;
