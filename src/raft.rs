@@ -53,6 +53,7 @@ pub struct AppendEntriesReply {
     pub success: bool,
 }
 
+#[derive(Clone)]
 pub struct RequestVoteArgs {
     pub term : u64,
     pub candidate_id : NodeId,
