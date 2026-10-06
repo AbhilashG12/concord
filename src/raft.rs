@@ -12,6 +12,35 @@ pub enum Role {
     Leader,
 }
 
+pub struct Snapshot {
+    pub last_included_index: u64,
+    pub last_included_term: u64,
+    pub data: Vec<u8>,
+}
+
+pub struct InstallSnapshotArgs{
+    pub term: u64,
+    pub leader_id: NodeId,
+    pub last_included_index: u64,
+    pub last_included_term:u64,
+    pub data: Vec<u8>,
+}
+
+pub struct InstallSnapshotReply{
+    pub term: u64,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClusterConfig {
+    Single(Vec<NodeId>),
+    Joint { old: Vec<NodeId>, new: Vec<NodeId> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogPayload {
+    Command(ClientRequest),
+    ConfigChange(ClusterConfig), 
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogEntry{
     pub term : u64,
@@ -36,6 +65,10 @@ pub struct RaftNode {
     pub match_index: HashMap<NodeId,u64>,
 
     pub storage: Box<dyn Storage>,
+
+
+    pub last_included_index: u64,
+    pub last_included_term: u64,
 
 }
 
@@ -86,6 +119,25 @@ impl RaftNode {
         }
     }
 
+    fn array_index(&self, global_index: u64) -> Option<usize> {
+        if global_index <= self.last_included_index {
+            return None; 
+        }
+        Some((global_index - self.last_included_index - 1) as usize)
+    }
+
+    fn term_at(&self, global_index: u64) -> u64 {
+        if global_index == self.last_included_index {
+            return self.last_included_term;
+        }
+        if let Some(idx) = self.array_index(global_index) {
+            if idx < self.log.len() {
+                return self.log[idx].term;
+            }
+        }
+        0
+    }
+
     pub fn become_follower(&mut self, term:u64, leader_id:Option<NodeId>){
         self.role = Role::Follower;
         self.current_term = term;
@@ -118,6 +170,87 @@ impl RaftNode {
                 self.match_index.insert(node_id, 0);
             }
         }
+    }
+        
+    pub fn handle_install_snapshot(&mut self, args: InstallSnapshotArgs) -> InstallSnapshotReply {
+        if args.term < self.current_term {
+            return InstallSnapshotReply { term: self.current_term };
+        }
+        
+        self.become_follower(args.term, Some(args.leader_id));
+
+        if args.last_included_index <= self.last_included_index {
+            return InstallSnapshotReply { term: self.current_term };
+        }
+
+        if let Some(idx) = self.array_index(args.last_included_index) {
+            if idx < self.log.len() && self.log[idx].term == args.last_included_term {
+                self.log.drain(0..=idx);
+            } else {
+                self.log.clear(); 
+            }
+        } else {
+            self.log.clear(); 
+        }
+
+        self.last_included_index = args.last_included_index;
+        self.last_included_term = args.last_included_term;
+        
+        self.commit_index = std::cmp::max(self.commit_index, args.last_included_index);
+        self.last_applied = std::cmp::max(self.last_applied, args.last_included_index);
+        
+        InstallSnapshotReply { term: self.current_term }
+    }
+        
+    pub fn create_snapshot(&mut self, compact_index: u64, state_machine_data: Vec<u8>) {
+        // Reject if the index is already compacted or hasn't been committed yet.
+        // We can only snapshot data that we know is mathematically finalized.
+        if compact_index <= self.last_included_index || compact_index > self.commit_index {
+            return;
+        }
+
+        let new_last_included_term = self.term_at(compact_index);
+
+        // Calculate how many entries to remove from the front of the Vec
+        if let Some(array_idx) = self.array_index(compact_index) {
+            // Remove everything up to and including the compacted index
+            self.log.drain(0..=array_idx);
+        } else {
+            self.log.clear(); // Edge case: compacting the entire log
+        }
+
+        self.last_included_index = compact_index;
+        self.last_included_term = new_last_included_term;
+
+        // DURABILITY BARRIER: 
+        // 1. Save `state_machine_data` to a snapshot file on disk.
+        // 2. Truncate the Write-Ahead Log file so disk space is actually freed.
+        // self.storage.save_snapshot(compact_index, state_machine_data).unwrap();
+    }
+
+    pub fn is_committed(&self, index: u64, config: &ClusterConfig) -> bool {
+        match config {
+            ClusterConfig::Single(nodes) => {
+                self.check_majority(nodes, index)
+            }
+            ClusterConfig::Joint { old, new } => {
+                self.check_majority(old, index) && self.check_majority(new, index)
+            }
+        }
+    }
+
+    fn check_majority(&self, cluster: &[NodeId], target_index: u64) -> bool {
+        let mut count = 0;
+        for node in cluster {
+            if *node == self.id {
+                count += 1; 
+            } else if let Some(&match_idx) = self.match_index.get(node) {
+                if match_idx >= target_index {
+                    count += 1;
+                }
+            }
+        }
+        count >= (cluster.len() / 2) + 1
     }
 
     pub fn handle_request_vote(&mut self, args: RequestVoteArgs) -> RequestVoteReply {
@@ -227,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_role_transitions() {
-        let mut node = new_test_node(1); // FIXED
+        let mut node = new_test_node(1); 
         assert_eq!(node.role, Role::Follower);
         assert_eq!(node.current_term, 0);
 
@@ -340,5 +473,52 @@ mod tests {
         assert_eq!(rebooted_node.current_term, 1);
         assert_eq!(rebooted_node.voted_for, Some(1));
         assert_eq!(rebooted_node.role, Role::Follower); 
+    }
+    use crate::raft::{ClusterConfig, RaftNode};
+
+    #[test]
+    fn test_array_index_translation() {
+        let mut node = RaftNode::new(1);
+        node.last_included_index = 100; // We have snapshotted the first 100 entries
+
+        // Global index 100 is inside the snapshot, so it shouldn't map to the active log
+        assert_eq!(node.array_index(100), None);
+        
+        // Global index 101 should be the very first item in our Rust Vec (index 0)
+        assert_eq!(node.array_index(101), Some(0));
+        
+        // Global index 150 should be at Vec index 49
+        assert_eq!(node.array_index(150), Some(49));
+    }
+
+    #[test]
+    fn test_joint_consensus_majority() {
+        let mut node = RaftNode::new(1); // We are Node 1
+        node.match_index.insert(2, 50);  // Node 2 has up to index 50
+        node.match_index.insert(3, 50);  // Node 3 has up to index 50
+        node.match_index.insert(4, 10);  // Node 4 is lagging (index 10)
+        node.match_index.insert(5, 10);  // Node 5 is lagging (index 10)
+
+        // Target index to check: 50.
+        // Node 1 (us), Node 2, and Node 3 have it. (Total 3 nodes have it).
+
+        // SCENARIO 1: Old Configuration [1, 2, 3]
+        let old_config = vec![1, 2, 3];
+        assert_eq!(node.check_majority(&old_config, 50), true); // 3 out of 3 have it.
+
+        // SCENARIO 2: New Configuration [1, 2, 3, 4, 5]
+        let new_config = vec![1, 2, 3, 4, 5];
+        assert_eq!(node.check_majority(&new_config, 50), true); // 3 out of 5 is a majority.
+
+        // SCENARIO 3: Joint Configuration [1, 2, 3] + [1, 2, 3, 4, 5]
+        let joint = ClusterConfig::Joint {
+            old: old_config,
+            new: new_config,
+        };
+        // Because BOTH old and new have independent majorities for index 50, it is committed!
+        assert_eq!(node.is_committed(50, &joint), true);
+
+        // SCENARIO 4: What if we check index 51? Nobody has it yet.
+        assert_eq!(node.is_committed(51, &joint), false);
     }
 }
