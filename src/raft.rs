@@ -2,6 +2,7 @@ use serde::{Serialize, Deserialize};
 use crate::command::ClientRequest;
 use crate::storage::Storage;
 use std::collections::HashMap;
+use tracing::{info, warn, instrument};
 
 pub type NodeId = u64;
 
@@ -72,6 +73,7 @@ pub struct RaftNode {
 
 }
 
+#[derive(Clone,Debug)]
 pub struct AppendEntriesArgs {
     pub term: u64,
     pub leader_id: NodeId,
@@ -81,12 +83,13 @@ pub struct AppendEntriesArgs {
     pub leader_commit: u64,
 }
 
+#[derive(Clone,Debug)]
 pub struct AppendEntriesReply {
     pub term: u64,
     pub success: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone,Debug)]
 pub struct RequestVoteArgs {
     pub term : u64,
     pub candidate_id : NodeId,
@@ -94,6 +97,7 @@ pub struct RequestVoteArgs {
     pub last_log_term : u64,
 }
 
+#[derive(Clone,Debug)]
 pub struct RequestVoteReply {
     pub term : u64,
     pub vote_granted : bool,
@@ -158,7 +162,9 @@ impl RaftNode {
         self.leader_id = None;
     }
 
+    #[instrument(skip(self), fields(id = self.id, term = self.current_term))]
     pub fn become_leader(&mut self,cluster_nodes: &[NodeId]){
+        info!("Achieved quorum. Transitioning to LEADER.");
         self.role = Role::Leader;
         self.leader_id = Some(self.id);
 

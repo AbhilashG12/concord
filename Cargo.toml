@@ -3,10 +3,28 @@ name = "concord"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "concord"
+path = "src/lib.rs"
+
+[[bin]]
+name = "concordd"
+path = "src/bin/concordd.rs"
+
+[[bench]]
+name = "state_machine_benches"
+harness = false
+
 [dependencies]
 async-trait = "0.1.92"
+figment = { version = "0.10.19", features = ["env", "toml"] }
 rand = { version = "0.8", features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.21"
-tokio = { version = "1.53.2", features = ["full"] }
+tokio = { version = "1.53.2", features = ["full", "signal"] }
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+
+[dev-dependencies]
+criterion = "0.8.2"

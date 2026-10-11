@@ -19,6 +19,14 @@ pub struct DiskStorage {
     log_file : File,
 }
 
+impl DiskStorage {
+    pub fn new<P: AsRef<Path>>(meta_path: P, log_path: P) -> std::io::Result<Self> {
+        let meta_file = OpenOptions::new().read(true).write(true).create(true).open(meta_path)?;
+        let log_file = OpenOptions::new().read(true).write(true).create(true).append(true).open(log_path)?;
+        Ok(Self { meta_file, log_file })
+    }
+}
+
 impl Storage for DiskStorage {
     fn save_metadata(&mut self, term: u64, voted_for: Option<NodeId>)->Result<()>{
         self.meta_file.seek(SeekFrom::Start(0)).unwrap();
