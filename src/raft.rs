@@ -116,6 +116,8 @@ impl RaftNode {
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             storage,
+            last_included_index: 0,
+            last_included_term: 0,
         }
     }
 
@@ -478,47 +480,40 @@ mod tests {
 
     #[test]
     fn test_array_index_translation() {
-        let mut node = RaftNode::new(1);
+        // Use MockStorage instead of the deleted new() method
+        let storage = Box::new(crate::storage::mock::MockStorage { term: 0, voted_for: None, log: vec![] });
+        let mut node = RaftNode::recover(1, storage);
+        
         node.last_included_index = 100; // We have snapshotted the first 100 entries
 
-        // Global index 100 is inside the snapshot, so it shouldn't map to the active log
         assert_eq!(node.array_index(100), None);
-        
-        // Global index 101 should be the very first item in our Rust Vec (index 0)
         assert_eq!(node.array_index(101), Some(0));
-        
-        // Global index 150 should be at Vec index 49
         assert_eq!(node.array_index(150), Some(49));
     }
 
     #[test]
     fn test_joint_consensus_majority() {
-        let mut node = RaftNode::new(1); // We are Node 1
-        node.match_index.insert(2, 50);  // Node 2 has up to index 50
-        node.match_index.insert(3, 50);  // Node 3 has up to index 50
-        node.match_index.insert(4, 10);  // Node 4 is lagging (index 10)
-        node.match_index.insert(5, 10);  // Node 5 is lagging (index 10)
+        // Use MockStorage here as well
+        let storage = Box::new(crate::storage::mock::MockStorage { term: 0, voted_for: None, log: vec![] });
+        let mut node = RaftNode::recover(1, storage); 
+        
+        node.match_index.insert(2, 50);  
+        node.match_index.insert(3, 50);  
+        node.match_index.insert(4, 10);  
+        node.match_index.insert(5, 10);  
 
-        // Target index to check: 50.
-        // Node 1 (us), Node 2, and Node 3 have it. (Total 3 nodes have it).
-
-        // SCENARIO 1: Old Configuration [1, 2, 3]
         let old_config = vec![1, 2, 3];
-        assert_eq!(node.check_majority(&old_config, 50), true); // 3 out of 3 have it.
+        assert_eq!(node.check_majority(&old_config, 50), true); 
 
-        // SCENARIO 2: New Configuration [1, 2, 3, 4, 5]
         let new_config = vec![1, 2, 3, 4, 5];
-        assert_eq!(node.check_majority(&new_config, 50), true); // 3 out of 5 is a majority.
+        assert_eq!(node.check_majority(&new_config, 50), true); 
 
-        // SCENARIO 3: Joint Configuration [1, 2, 3] + [1, 2, 3, 4, 5]
         let joint = ClusterConfig::Joint {
             old: old_config,
             new: new_config,
         };
-        // Because BOTH old and new have independent majorities for index 50, it is committed!
+        
         assert_eq!(node.is_committed(50, &joint), true);
-
-        // SCENARIO 4: What if we check index 51? Nobody has it yet.
         assert_eq!(node.is_committed(51, &joint), false);
     }
 }
